@@ -1,23 +1,15 @@
-import os
-import time
-import requests
 import logging
-import telegram
+import os
+import sys
+import time
+from http import HTTPStatus
 
+import requests
+import telegram
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
-
-logging.basicConfig(
-    format='%(asctime)s, %(levelname)s, %(message)s',
-    level=logging.INFO,
-    filename='main.log',
-    filemode='w',
-)
-logger = logging.getLogger(__name__)
-logger.addHandler(
-    logging.StreamHandler()
-)
 
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
@@ -36,15 +28,30 @@ HOMEWORK_STATUSES = {
 }
 
 
+logger = logging.getLogger(__name__)
+logger.addHandler(
+    logging.StreamHandler()
+)
+
+
+class СustomException(Exception):
+    """Кастомное исключение."""
+
+    pass
+
+
 def send_message(bot, message):
     """Отправка сообщений в TELEGRAM."""
     try:
+        logger.info('Началась отправка сообщения в TELEGRAM!')
         bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=message,
         )
-    except Exception:
-        logger.error('Ошибка отправки сообщения в TELEGRAM!')
+    except telegram.error.TelegramError as error:
+        logger.error(f'Ошибка отправки сообщения в TELEGRAM: {error}!')
+    else:
+        logger.info('Сообщение в TELEGRAM успешно отправлено!')
 
 
 def get_api_answer(current_timestamp):
@@ -53,40 +60,53 @@ def get_api_answer(current_timestamp):
     params = {'from_date': timestamp}
 
     try:
+        logger.info('Началась отправка запроса к Яндекс.Домашка!')
         homework = requests.get(
             ENDPOINT,
             headers=HEADERS,
             params=params,
         )
-        logger.info('Запрос к серверу Яндекс.Домашка.')
-    except Exception as error:
+        logger.info('Запрос к Яндекс.Домашка успешно отправлен!')
+    except requests.exceptions.HTTPError as error:
         logging.error(f'Ошибка при запросе к основному API: {error}!')
-        raise Exception(f'Ошибка при запросе к основному API: {error}!')
-    if homework.status_code != 200:
+        raise СustomException(f'Ошибка при запросе к основному API: {error}!')
+    except requests.exceptions.Timeout as error:
+        logger.error(f'Таймаут: {error}')
+        raise СustomException(f'Таймаут: {error}')
+    except requests.exceptions.ConnectionError as error:
+        logger.error(f'Ошибка соединения с Яндекс.Домашка: {error}')
+        raise СustomException(f'Ошибка соединения с Яндекс.Домашка: {error}')
+    except requests.exceptions.RequestException as error:
+        logger.error(f'Сбой запроса: {error}')
+        raise СustomException(f'Сбой запроса: {error}')
+    if homework.status_code != HTTPStatus.OK:
         status_code = homework.status_code
         logging.error(f'Статус не равен 200: {status_code}!')
-        raise Exception(f'Статус не равен 200: {status_code}!')
+        raise СustomException(f'Статус не равен 200: {status_code}!')
     try:
-        return homework.json()
-    except ValueError:
-        logger.error('Ошибка обработки ответа от Яндекс.Домашка!')
-        raise ValueError('Ошибка обработки ответа от Яндекс.Домашка!')
+        homework_json = homework.json()
+        return homework_json
+    except json.decoder.JSONDecodeError:
+        logger.error('Ответ от Яндекс.Домашка не формата JSON!')
+        raise СustomException('Ответ от Яндекс.Домашка не формата JSON!')
 
 
 def check_response(response):
     """Проверка ответа API на корректность."""
-    if type(response) is not dict:
+    if not isinstance(response, dict):
         raise TypeError('Ответ от Яндекс.Домашка не является словарём!')
-    try:
+
+    if 'homeworks' not in response or 'current_date' not in response:
+        logger.error('Ключ "homeworks" или "current_date" не найдены!')
+        raise KeyError('Ключ "homeworks" или "current_date" не найдены!')
+    else:
         list_homeworks = response.get('homeworks')
-    except KeyError:
-        logger.error('Ключ "homeworks" не найден!')
-        raise KeyError('Ключ "homeworks" не найден!')
-    try:
-        homework = list_homeworks[0]
-    except IndexError:
-        logger.error('Домашняя работа не найдена!')
-        raise IndexError('Домашняя работа не найдена!')
+    if not isinstance(list_homeworks, list):
+        raise KeyError(
+            'В ответе от API под ключом "homeworks" пришел не список.'
+            f' response = {response}.'
+        )
+    homework = list_homeworks[0]
     return homework
 
 
@@ -95,13 +115,13 @@ def parse_status(homework):
     if 'homework_name' not in homework:
         raise KeyError('В ответе не найден ключ "homework_name"!')
     if 'status' not in homework:
-        raise Exception('В ответе не найден ключ "status"!')
+        raise СustomException('В ответе не найден ключ "status"!')
 
     homework_name = homework.get('homework_name')
     homework_status = homework.get('status')
 
     if homework_status not in HOMEWORK_STATUSES:
-        raise Exception(f'Статус работы не определён: {homework_status}!')
+        raise СustomException(f'Статус работы не найден: {homework_status}!')
 
     verdict = HOMEWORK_STATUSES[homework_status]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
@@ -109,7 +129,7 @@ def parse_status(homework):
 
 def check_tokens():
     """Проверка наличия переменных окружения."""
-    if PRACTICUM_TOKEN and TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+    if all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
         return True
     else:
         return False
@@ -117,13 +137,13 @@ def check_tokens():
 
 def main():
     """Основная логика работы бота."""
+    if not check_tokens():
+        logger.critical('Не найдена переменная окрежения!')
+        sys.exit('Не найдена переменная окрежения!')
+
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
     STATUS = ''
-
-    if not check_tokens():
-        logger.critical('На найдена переменная окрежения!')
-        raise Exception('На найдена переменная окрежения!')
 
     while True:
         try:
@@ -134,14 +154,19 @@ def main():
                 send_message(bot, message)
                 STATUS = message
             current_timestamp = response.get('current_date')
-            time.sleep(RETRY_TIME)
         except Exception as error:
             logger.error(error)
             message = f'Сбой в работе программы: {error}'
             send_message(bot, message)
+        finally:
             time.sleep(RETRY_TIME)
-        time.sleep(RETRY_TIME)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        format='%(asctime)s, %(levelname)s, %(message)s',
+        level=logging.INFO,
+        filename='88_YandexPracticum/homework_bot/exceptions.log',
+        filemode='w',
+    )
     main()
