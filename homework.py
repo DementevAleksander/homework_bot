@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -7,7 +8,6 @@ from http import HTTPStatus
 import requests
 import telegram
 from dotenv import load_dotenv
-import json
 
 load_dotenv()
 
@@ -29,15 +29,19 @@ HOMEWORK_STATUSES = {
 
 
 logger = logging.getLogger(__name__)
-logger.addHandler(
-    logging.StreamHandler()
-)
+logger.addHandler(logging.StreamHandler(sys.stdout))
 
 
 class СustomException(Exception):
     """Кастомное исключение."""
-
-    pass
+    file_handler = logging.FileHandler(
+        'exceptions.log',
+        mode='w',
+    )
+    file_handler.setLevel(logging.ERROR)
+    text_format = logging.Formatter('%(asctime)s, %(levelname)s, %(message)s')
+    file_handler.setFormatter(text_format)
+    logger.addHandler(file_handler)
 
 
 def send_message(bot, message):
@@ -49,7 +53,9 @@ def send_message(bot, message):
             text=message,
         )
     except telegram.error.TelegramError as error:
-        logger.error(f'Ошибка отправки сообщения в TELEGRAM: {error}!')
+        raise СustomException(
+            f'Ошибка отправки сообщения в TELEGRAM: {error}!'
+        )
     else:
         logger.info('Сообщение в TELEGRAM успешно отправлено!')
 
@@ -68,26 +74,20 @@ def get_api_answer(current_timestamp):
         )
         logger.info('Запрос к Яндекс.Домашка успешно отправлен!')
     except requests.exceptions.HTTPError as error:
-        logging.error(f'Ошибка при запросе к основному API: {error}!')
         raise СustomException(f'Ошибка при запросе к основному API: {error}!')
     except requests.exceptions.Timeout as error:
-        logger.error(f'Таймаут: {error}')
         raise СustomException(f'Таймаут: {error}')
     except requests.exceptions.ConnectionError as error:
-        logger.error(f'Ошибка соединения с Яндекс.Домашка: {error}')
         raise СustomException(f'Ошибка соединения с Яндекс.Домашка: {error}')
     except requests.exceptions.RequestException as error:
-        logger.error(f'Сбой запроса: {error}')
         raise СustomException(f'Сбой запроса: {error}')
     if homework.status_code != HTTPStatus.OK:
         status_code = homework.status_code
-        logging.error(f'Статус не равен 200: {status_code}!')
         raise СustomException(f'Статус не равен 200: {status_code}!')
     try:
         homework_json = homework.json()
         return homework_json
     except json.decoder.JSONDecodeError:
-        logger.error('Ответ от Яндекс.Домашка не формата JSON!')
         raise СustomException('Ответ от Яндекс.Домашка не формата JSON!')
 
 
@@ -97,17 +97,16 @@ def check_response(response):
         raise TypeError('Ответ от Яндекс.Домашка не является словарём!')
 
     if 'homeworks' not in response or 'current_date' not in response:
-        logger.error('Ключ "homeworks" или "current_date" не найдены!')
         raise KeyError('Ключ "homeworks" или "current_date" не найдены!')
-    else:
-        list_homeworks = response.get('homeworks')
+
+    list_homeworks = response.get('homeworks')
+
     if not isinstance(list_homeworks, list):
         raise KeyError(
             'В ответе от API под ключом "homeworks" пришел не список.'
             f' response = {response}.'
         )
-    homework = list_homeworks[0]
-    return homework
+    return list_homeworks
 
 
 def parse_status(homework):
@@ -129,10 +128,7 @@ def parse_status(homework):
 
 def check_tokens():
     """Проверка наличия переменных окружения."""
-    if all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
-        return True
-    else:
-        return False
+    return all([PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID])
 
 
 def main():
@@ -149,7 +145,7 @@ def main():
         try:
             response = get_api_answer(current_timestamp)
             homework = check_response(response)
-            message = parse_status(homework)
+            message = parse_status(homework[0])
             if message != STATUS:
                 send_message(bot, message)
                 STATUS = message
@@ -166,7 +162,7 @@ if __name__ == '__main__':
     logging.basicConfig(
         format='%(asctime)s, %(levelname)s, %(message)s',
         level=logging.INFO,
-        filename='88_YandexPracticum/homework_bot/exceptions.log',
+        filename='88_YandexPracticum/homework_bot/homework.log',
         filemode='w',
     )
     main()
