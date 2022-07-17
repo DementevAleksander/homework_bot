@@ -34,6 +34,7 @@ logger.addHandler(logging.StreamHandler(sys.stdout))
 
 class СustomException(Exception):
     """Кастомное исключение."""
+
     file_handler = logging.FileHandler(
         'exceptions.log',
         mode='w',
